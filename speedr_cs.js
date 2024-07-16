@@ -1,3 +1,508 @@
+'use strict';
+
+
+async function initialize( browser ) {
+
+
+
+
+
+	function defineVideoController() {
+
+
+
+		tc.videoController.prototype.initializeControls = function () {
+
+			const document = this.video.ownerDocument;
+
+			const rect = this.video.getBoundingClientRect();
+			// getBoundingClientRect is relative to the viewport; style coordinates
+			// are relative to offsetParent, so we adjust for that here. offsetParent
+			// can be null if the video has `display: none` or is not yet in the DOM.
+			const offsetRect = this.video.offsetParent?.getBoundingClientRect();
+			const top = Math.max( rect.top - ( offsetRect?.top || 0 ), 0 ) + "px";
+			const left = Math.max( rect.left - ( offsetRect?.left || 0 ), 0 ) + "px";
+
+			log( "Speed variable set to: " + speed, 5 );
+
+			var wrapper = document.createElement( "div" );
+			wrapper.classList.add( "vsc-controller" );
+			if ( !this.video.currentSrc ) wrapper.classList.add( "vsc-nosource" );
+			if ( tc.settings.startHidden ) wrapper.classList.add( "vsc-hidden" );
+
+
+			var shadow = wrapper.attachShadow( { mode: "open" } );
+			var shadowTemplate = `
+        <style>
+          @import "${ browser.runtime?.getURL( "shadow.css" ) }";
+        </style>
+
+
+      `;
+			shadow.innerHTML = shadowTemplate;
+
+
+			this.speedIndicator = shadow.querySelector( "span" );
+			var fragment = document.createDocumentFragment();
+			fragment.appendChild( wrapper );
+
+			switch ( true ) {
+				case location.hostname == "www.amazon.com":
+				case location.hostname == "www.reddit.com":
+				case /hbogo\./.test( location.hostname ):
+					// insert before parent to bypass overlay
+					this.parent.parentElement.insertBefore( fragment, this.parent );
+					break;
+				case location.hostname == "www.facebook.com":
+					// this is a monstrosity but new FB design does not have *any*
+					// semantic handles for us to traverse the tree, and deep nesting
+					// that we need to bubble up from to get controller to stack correctly
+					let p = this.parent.parentElement.parentElement.parentElement
+						.parentElement.parentElement.parentElement.parentElement;
+					p.insertBefore( fragment, p.firstChild );
+					break;
+				case location.hostname == "tv.apple.com":
+					// insert before parent to bypass overlay
+					this.parent.parentNode.insertBefore( fragment, this.parent.parentNode.firstChild );
+					break;
+				default:
+					// Note: when triggered via a MutationRecord, it's possible that the
+					// target is not the immediate parent. This appends the controller as
+					// the first element of the target, which may not be the parent.
+					this.parent.insertBefore( fragment, this.parent.firstChild );
+			}
+			return wrapper;
+		};
+	}
+	function escapeStringRegExp( str ) {
+		matchOperatorsRe = /[|\\{}()[\]^$+*?.]/g;
+		return str.replace( matchOperatorsRe, "\\$&" );
+	}
+	function isBlacklisted() {
+		blacklisted = false;
+		tc.settings.blacklist.split( "\n" ).forEach( ( match ) => {
+			match = match.replace( regStrip, "" );
+			if ( match.length == 0 ) {
+				return;
+			}
+
+			if ( match.startsWith( "/" ) ) {
+				try {
+					var parts = match.split( "/" );
+
+					if ( regEndsWithFlags.test( match ) ) {
+						var flags = parts.pop();
+						var regex = parts.slice( 1 ).join( "/" );
+					} else {
+						var flags = "";
+						var regex = match;
+					}
+
+					var regexp = new RegExp( regex, flags );
+				} catch ( err ) {
+					return;
+				}
+			} else {
+				var regexp = new RegExp( escapeStringRegExp( match ) );
+			}
+
+			if ( regexp.test( location.href ) ) {
+				blacklisted = true;
+				return;
+			}
+		} );
+		return blacklisted;
+	}
+	function refreshCoolDown() {
+		if ( refreshCoolDown.timer ) clearTimeout( refreshCoolDown.timer );
+		refreshCoolDown.timer = setTimeout( () => { refreshCoolDown.timer = false }, 1000 );
+	} refreshCoolDown.timer = false;
+
+
+
+
+
+
+	/**
+	 * Main initializer
+	 */
+
+
+	function initializeNow( document ) {
+		log( "Begin initializeNow", 5 );
+
+
+
+		
+
+		if ( tc.settings.audioBoolean ) {
+			var mediaTags = document.querySelectorAll( "video,audio" );
+		} else {
+			var mediaTags = document.querySelectorAll( "video" );
+		}
+
+		mediaTags.forEach( function ( video ) {
+			video.vsc = new tc.videoController( video );
+		} );
+
+		var frameTags = document.getElementsByTagName( "iframe" );
+		Array.prototype.forEach.call( frameTags, function ( frame ) {
+			// Ignore frames we don't have permission to access (different origin).
+			try {
+				var childDocument = frame.contentDocument;
+			} catch ( e ) {
+				return;
+			}
+			initializeWhenReady( childDocument );
+		} );
+		log( "End initializeNow", 5 );
+	}
+	function inIframe() {
+		try {
+			return window.self !== window.top;
+		} catch ( e ) { return true; }
+	}
+	function getShadow( parent ) {
+		let result = [];
+		function getChild( parent ) {
+			if ( parent.firstElementChild ) {
+				var child = parent.firstElementChild;
+				do {
+					result.push( child );
+					getChild( child );
+					if ( child.shadowRoot ) {
+						result.push( getShadow( child.shadowRoot ) );
+					}
+					child = child.nextElementSibling;
+				} while ( child );
+			}
+		}
+		getChild( parent );
+		return result.flat( Infinity );
+	}
+	function runAction( action, value, e ) {
+		log( "runAction Begin", 5 );
+
+		var mediaTags = tc.mediaElements;
+
+		// Get the controller that was used if called from a button press event e
+		if ( e ) {
+			var targetController = e.target.getRootNode().host;
+		}
+
+		mediaTags.forEach( function ( v ) {
+			var controller = v.vsc.div;
+
+			// Don't change video speed if the video has a different controller
+			if ( e && !( targetController == controller ) ) {
+				return;
+			}
+
+			showController( controller );
+
+			if ( !v.classList.contains( "vsc-cancelled" ) ) {
+				if ( action === "rewind" ) {
+					log( "Rewind", 5 );
+					v.currentTime -= value;
+				} else if ( action === "advance" ) {
+					log( "Fast forward", 5 );
+					v.currentTime += value;
+				} else if ( action === "faster" ) {
+					log( "Increase speed", 5 );
+					// Maximum playback speed in Chrome is set to 16:
+					// https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/core/html/media/html_media_element.h;l=117;drc=70155ab40e50115ac8cff6e8f4b7703a7784d854
+					var s = Math.min(
+						( v.playbackRate < 0.1 ? 0.0 : v.playbackRate ) + value,
+						16
+					);
+					setSpeed( v, s );
+				} else if ( action === "slower" ) {
+					log( "Decrease speed", 5 );
+					// Video min rate is 0.0625:
+					// https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/core/html/media/html_media_element.h;l=116;drc=70155ab40e50115ac8cff6e8f4b7703a7784d854
+					var s = Math.max( v.playbackRate - value, 0.07 );
+					setSpeed( v, s );
+				} else if ( action === "reset" ) {
+					log( "Reset speed", 5 );
+					resetSpeed( v, 1.0 );
+				} else if ( action === "display" ) {
+					log( "Showing controller", 5 );
+					controller.classList.add( "vsc-manual" );
+					controller.classList.toggle( "vsc-hidden" );
+				} else if ( action === "blink" ) {
+					log( "Showing controller momentarily", 5 );
+					// if vsc is hidden, show it briefly to give the use visual feedback that the action is excuted.
+					if (
+						controller.classList.contains( "vsc-hidden" ) ||
+						controller.blinkTimeOut !== undefined
+					) {
+						clearTimeout( controller.blinkTimeOut );
+						controller.classList.remove( "vsc-hidden" );
+						controller.blinkTimeOut = setTimeout(
+							() => {
+								controller.classList.add( "vsc-hidden" );
+								controller.blinkTimeOut = undefined;
+							},
+							value ? value : 1000
+						);
+					}
+				} else if ( action === "drag" ) {
+					handleDrag( v, e );
+				} else if ( action === "fast" ) {
+					resetSpeed( v, value );
+				} else if ( action === "pause" ) {
+					pause( v );
+				} else if ( action === "muted" ) {
+					muted( v );
+				} else if ( action === "mark" ) {
+					setMark( v );
+				} else if ( action === "jump" ) {
+					jumpToMark( v );
+				}
+			}
+		} );
+		log( "runAction End", 5 );
+	}
+	function run( action, value, e ) {
+		var targetController;
+		// Get the controller that was used if called from a button press event e
+		if ( e ) targetController = e.target.getRootNode().host;
+		tc.mediaElements.forEach( v => run.execute( action, value, e, v, targetController ) );
+	}
+	run.playback = ( v, value ) => {
+		switch ( value ) {
+			case `autopause`:
+				v.autopaused = v.paused ? false : true;
+				if ( !v.paused ) v.pause(); break;
+			case `autoplay`:
+				if ( !v.autopaused || !v.paused ) break; //if is already playing or not autopaused, the should not autoplay.
+				v.autopaused = false; v.play(); break;
+			case `toggle`:
+				v[ v.paused ? `play` : `pause` ](); break;
+			default: //assuming 'play' or 'pause'
+				v[ value ]();
+		}
+	}
+	run.execute = ( action, value, e, v, targetController ) => {
+		// function _visual(action, value, e, v, targetController) {
+		var controller = v?.vsc?.div;
+		// Don't change video speed if the video has a different controller
+		if ( e && targetController != controller ) return;
+		showController( controller );
+		if ( v.classList.contains( `vsc-cancelled` ) ) return;
+		let s;
+		switch ( action ) {
+			case `manuallyExecute`: codeToRunManually(); break;
+			case `rewind`: v.currentTime -= value; break;
+			case `advance`: v.currentTime += value; break;
+			case `faster`: s = Math.min( ( v.playbackRate < 0.1 ? 0.0 : v.playbackRate ) + value, 16 );// Maximum playback speed in Chrome is set to 16:
+				setSpeed( v, s ); break;
+			case `slower`: s = Math.max( v.playbackRate - value, 0.25 );// Video min rate is 0.0625:; set the 0.25 to speed increment steps
+				setSpeed( v, s ); break;
+			case `reset`: resetSpeed( v, 1.0 );
+			case `display`: controller.classList.add( "vsc-manual" );
+				controller.classList.toggle( "vsc-hidden" ); break;
+			case `blink`:// if vsc is hidden, show it briefly to give the use visual feedback that the action is excuted.
+				if ( !controller.classList.contains( "vsc-hidden" ) && !controller.blinkTimeOut ) break;
+				clearTimeout( controller.blinkTimeOut );
+				controller.classList.remove( "vsc-hidden" );
+				controller.blinkTimeOut = setTimeout( () => {
+					controller.classList.add( "vsc-hidden" );
+					controller.blinkTimeOut = undefined;
+				}, value || 1000 ); break;
+			case `drag`: handleDrag( v, e ); break;
+			case `fast`: resetSpeed( v, value ); break;
+			case `playback`: run.playback( v, value ); break;
+			case `pause`: pause( v ); break; //playPause();
+			case `muted`: muted( v ); break;
+			case `mark`: setMark( v ); break;
+			case `jump`: jumpToMark( v ); break;
+			case `togglePictureInPicture`: if ( !v.paused ) togglePictureInPicture( v ); break;
+		}
+	}
+	function setSpeed( video, speed ) {
+		log( "setSpeed started: " + speed, 5 );
+		var speedvalue = speed.toFixed( 2 );
+		if ( tc.settings.forceLastSavedSpeed ) {
+			video.dispatchEvent(
+				new CustomEvent( "ratechange", {
+					detail: { origin: "videoSpeed", speed: speedvalue }
+				} )
+			);
+		} else {
+			video.playbackRate = Number( speedvalue );
+		}
+		var speedIndicator = video.vsc.speedIndicator;
+		speedIndicator.textContent = speedvalue;
+		tc.settings.lastSpeed = speed;
+		refreshCoolDown();
+		log( "setSpeed finished: " + speed, 5 );
+	}
+	function pause( v ) {
+		return ( v.paused ? v.play() : v.pause() )
+	}
+	function resetSpeed( v, target ) {
+		if ( v.playbackRate === target ) {
+			if ( v.playbackRate === getKeyBindings( "reset" ) ) {
+				if ( target !== 1.0 ) {
+					log( "Resetting playback speed to 1.0", 4 );
+					setSpeed( v, 1.0 );
+				} else {
+					log( 'Toggling playback speed to "fast" speed', 4 );
+					setSpeed( v, getKeyBindings( "fast" ) );
+				}
+			} else {
+				log( 'Toggling playback speed to "reset" speed', 4 );
+				setSpeed( v, getKeyBindings( "reset" ) );
+			}
+		} else {
+			log( 'Toggling playback speed to "reset" speed', 4 );
+			setKeyBindings( "reset", v.playbackRate );
+			setSpeed( v, target );
+		}
+	}
+	function muted( v ) {
+		v.muted = v.muted !== true;
+	}
+	function setMark( v ) {
+		log( "Adding marker", 5 );
+		v.vsc.mark = v.currentTime;
+	}
+	function jumpToMark( v ) {
+		log( "Recalling marker", 5 );
+		if ( v.vsc.mark && typeof v.vsc.mark === "number" ) {
+			v.currentTime = v.vsc.mark;
+		}
+	}
+	function handleDrag( video, e ) {
+		const controller = video.vsc.div;
+		const shadowController = controller.shadowRoot.querySelector( "#controller" );
+
+		// Find nearest parent of same size as video parent.
+		var parentElement = controller.parentElement;
+		while (
+			parentElement.parentNode &&
+			parentElement.parentNode.offsetHeight === parentElement.offsetHeight &&
+			parentElement.parentNode.offsetWidth === parentElement.offsetWidth
+		) {
+			parentElement = parentElement.parentNode;
+		}
+
+		video.classList.add( "vcs-dragging" );
+		shadowController.classList.add( "dragging" );
+
+		const initialMouseXY = [ e.clientX, e.clientY ];
+		const initialControllerXY = [
+			parseInt( shadowController.style.left ),
+			parseInt( shadowController.style.top )
+		];
+
+		const startDragging = ( e ) => {
+			let style = shadowController.style;
+			let dx = e.clientX - initialMouseXY[ 0 ];
+			let dy = e.clientY - initialMouseXY[ 1 ];
+			style.left = initialControllerXY[ 0 ] + dx + "px";
+			style.top = initialControllerXY[ 1 ] + dy + "px";
+		};
+
+		const stopDragging = () => {
+			parentElement.removeEventListener( "mousemove", startDragging );
+			parentElement.removeEventListener( "mouseup", stopDragging );
+			parentElement.removeEventListener( "mouseleave", stopDragging );
+
+			shadowController.classList.remove( "dragging" );
+			video.classList.remove( "vcs-dragging" );
+		};
+
+		parentElement.addEventListener( "mouseup", stopDragging );
+		parentElement.addEventListener( "mouseleave", stopDragging );
+		parentElement.addEventListener( "mousemove", startDragging );
+	}
+	function showController( controller ) {
+		log( "Showing controller", 4 );
+		if ( !controller ) return;
+		controller.classList.add( "vcs-show" );
+		if ( showController.timer ) clearTimeout( showController.timer );
+		showController.timer = setTimeout( function () {
+			controller.classList.remove( "vcs-show" );
+			showController.timer = null;
+			log( "Hiding controller", 5 );
+		}, 2000 );
+	}
+	function getKeyBindings( action, what = "value" ) {
+		try {
+			return tc.settings.keyBindings.find( item => item.action === action )[ what ];
+		} catch ( e ) { return false }
+	}
+	function setKeyBindings( action, value ) {
+		tc.settings.keyBindings.find( item => item.action === action )[ "value" ] = value;
+	}
+	function codeToRunManually() {
+		var flattenedNodes = EXTLOGIC.getShadow( document.body );
+		var nodes = flattenedNodes.filter( x => ( x.tagName == "VIDEO" || x.tagName == "AUDIO" ) );
+		for ( let node of nodes ) {
+			console.log( `%cMEDIA FOUND:`, `color:yellow;background-color:darkBlue;`, node.outerHTML.match( /^\<.+>/i )[ 0 ] );
+			node.classList.add( "BB_media_" );
+			// only add vsc the first time for the apple-tv case (the attribute change is triggered every time you click the vsc)
+			// if (node.vsc && mutation.target.nodeName === 'APPLE-TV-PLUS-PLAYER') continue;
+			if ( node.vsc ) node.vsc.remove();
+			// _checkForVideo(node, node.parentNode || mutation.target, true); //last working
+			_checkForMedia( node, node.parentNode, `addedNodes` );
+		}
+	}
+	function togglePictureInPicture( v ) {
+		v.removeAttribute( `disablepictureinpicture` ); //Hulu has this, so we remove it.
+		if ( document.pictureInPictureElement ) return document.exitPictureInPicture();
+		// if (document.pictureInPictureEnabled) return v?.requestPictureInPicture();
+		// need to check if video is loaded before requesting to avoid `Uncaught (in promise) InvalidStateError: Failed to execute 'requestPictureInPicture' on 'HTMLVideoElement': Metadata for the video element are not loaded yet.` error.
+		if ( v?.readyState === 4 ) {
+			//it's loaded.
+			v.requestPictureInPicture();
+		} else {
+			v?.addEventListener( `loadeddata`, e => v?.requestPictureInPicture() );
+		}
+		// v?.requestPictureInPicture();
+	}
+	function visibilityHandler( e ) {
+		//works fine, just annoying when watching youtube, and only need audio.
+		return;
+		if ( document.pictureInPictureElement ) return; //no autopause when picture-in-picture is activated
+		let url = window.location.href.toString();
+		if ( url.includes( `www.hulu.com` ) ) return; //this function causes errors on hulu
+		run( `playback`, document.visibilityState === `hidden` ? `autopause` : `autoplay`, null );
+	}
+
+
+
+}
+
+( async function ( browser ) { //required to use "top-level" await
+	const [ monkeypatch, monkeypatch_DOM, videoModules ] = [
+		browser.runtime.getURL( "./lib/monkeypatch_prototypes/monkeypatch.mjs" ),
+		browser.runtime.getURL( "./lib/monkeypatch_prototypes/monkeypatch_DOM.mjs" ),
+		browser.runtime.getURL( "./modifyVideoPrototypeForTransform.mjs" ) ];
+
+	const MONKEYPATCH = await import( monkeypatch ); //declaration import is blocked for content scripts  in chrome browser
+	[ 'consoleColors', 'stringify', 'is', 'defer' ].forEach( patch => {
+		console.log( 'loaded MONKEYPATCH:', 'executing:', patch )
+		MONKEYPATCH[ patch ]();
+	} );
+	const MONKEYPATCH_DOM = await import( monkeypatch_DOM );
+	[ 'ShadowRootTraverse', 'eventListeners', 'preventDefault', 'keyboardEventProperties', 'patchingHTMLElements' ].forEach( patch => MONKEYPATCH_DOM[ patch ]() );
+	const VIDEOMODULES = await import( videoModules );
+	[ 'Media' ].forEach( patch => VIDEOMODULES[ patch ]() );
+
+	initialize( browser );
+
+
+} )( globalThis.browser || chrome );
+
+
+
+
+
+
+
 var regStrip = /^[\r\t\f\v ]+|[\r\t\f\v ]+$/gm;
 var regEndsWithFlags = /\/(?!.*(.).*\1)[gimsuy]*$/;
 
@@ -634,7 +1139,7 @@ function initializeNow(document) {
     // Only proceed with supposed removal if node is missing from DOM
     if (!added && document.body?.contains(node)) {
       // This was written prior to the addition of shadowRoot processing.
-      // TODO: Determine if shadowRoot deleted nodes need this sort of 
+      // TODO: Determine if shadowRoot deleted nodes need this sort of
       // check as well.
       return;
     }
